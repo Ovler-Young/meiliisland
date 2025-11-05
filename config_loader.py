@@ -47,6 +47,7 @@ class SyncConfig:
     index: str
     primary_key: str
     attributes: dict[str, list[str]]  # {"id": ["filterable", "sortable"]}
+    updated_at_field: str | None = None  # Optional: field for update tracking
 
 
 @dataclass
@@ -105,7 +106,8 @@ def load_config(path: str) -> Config:
             collection=collection,
             index=sync_data["index"],
             primary_key=sync_data["primary_key"],
-            attributes=sync_data["attributes"]
+            attributes=sync_data["attributes"],
+            updated_at_field=sync_data.get("updated_at_field")  # Optional
         )
         sync_configs.append(sync_config)
 

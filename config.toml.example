@@ -45,11 +45,15 @@ chunk_size = 50
 # Define one or more [[sync]] blocks
 # Each represents a collection/table → MeiliSearch index mapping
 
-# Example 1: Blog posts
+# Example 1: Blog posts (with update tracking)
 [[sync]]
 collection = "posts"           # Collection name (MongoDB) or table name (MySQL)
 index = "posts_index"          # MeiliSearch index name
 primary_key = "id"             # Primary key field
+
+# Optional: Enable update detection for existing documents
+# If specified, documents with updated_at > last_sync will be re-synced
+updated_at_field = "updated_at"  # Omit this line to disable update tracking
 
 # Attribute configuration (simple format)
 # Each field can be: filterable, sortable, searchable
@@ -62,7 +66,7 @@ tags = ["filterable"]
 published_date = ["sortable", "filterable"]
 view_count = ["sortable"]
 
-# Example 2: User comments
+# Example 2: User comments (no update tracking - immutable data)
 [[sync]]
 collection = "comments"
 index = "comments_index"

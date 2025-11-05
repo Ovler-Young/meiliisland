@@ -1,4 +1,6 @@
 .venv
 config.py
+config.toml
+sync_state.toml
 __pycache__
 config.yaml
