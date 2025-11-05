@@ -10,7 +10,7 @@ Original MySQL-based sync tool for FreshRSS databases.
 
 **Installation:**
 ```bash
-pip install -r requirements.txt
+uv sync
 cp config.py.example config.py
 # Edit config.py with your settings
 ```
@@ -42,8 +42,11 @@ Flexible, configuration-driven sync tool supporting both MySQL and MongoDB.
 #### Installation
 
 ```bash
-# Install dependencies
-uv pip install -r requirements.txt
+# Install the package with uv
+uv sync
+
+# Or install in editable mode for development
+uv pip install -e .
 
 # Create configuration
 cp config.toml.example config.toml
@@ -196,7 +199,8 @@ chunk_size = 50    # Larger batches = fewer API calls, more memory
 ├── config.toml.example     # Config template
 ├── sync_state.toml         # Sync timestamps (auto-created, gitignored)
 ├── config.py.example       # Legacy config template
-└── requirements.txt        # Python dependencies
+├── pyproject.toml          # Project metadata and dependencies (uv)
+└── requirements.txt        # Python dependencies (legacy)
 ```
 
 ### Adding New Database Sources

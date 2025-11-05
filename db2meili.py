@@ -208,7 +208,8 @@ async def main():
         sys.exit(1)
 
 
-if __name__ == "__main__":
+def cli_main():
+    """CLI entry point wrapper for async main function"""
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
@@ -217,3 +218,7 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"\n✗ Fatal error: {e}")
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    cli_main()

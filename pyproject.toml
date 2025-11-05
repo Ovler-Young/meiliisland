@@ -1,0 +1,32 @@
+[project]
+name = "meiliisland"
+version = "0.1.0"
+description = "Database to MeiliSearch sync tools supporting MySQL and MongoDB"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    # Core dependencies for both tools
+    "meilisearch-python-sdk>=0.27.0",
+    "tqdm>=4.66.0",
+
+    # New db2meili tool dependencies
+    "tomli>=2.0.0; python_version < '3.11'",  # TOML parser (built-in tomllib in 3.11+)
+    "tomli-w>=1.0.0",                          # TOML writer for state file
+    "motor>=3.3.0",                            # Async MongoDB driver
+    "aiomysql>=0.2.0",                         # Async MySQL driver
+    "pymongo>=4.6.0",                          # MongoDB support (motor dependency)
+
+    # Legacy freshrss_db2meili dependencies
+    "mysql-connector-python>=8.0.0",
+    "markdownify>=0.11.0",
+]
+
+[project.scripts]
+db2meili = "db2meili:cli_main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "ruff>=0.1.0",
+]
