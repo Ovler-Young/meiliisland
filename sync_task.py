@@ -172,45 +172,60 @@ class SyncTask:
             finally:
                 queue.task_done()
 
-    async def get_existing_ids_from_meili(self) -> set[Any]:
+    async def check_ids_exist_in_meili(self, ids: list[Any]) -> set[Any]:
         """
-        Fetch all document IDs currently in MeiliSearch index.
-        Uses pagination to handle large indexes efficiently.
+        Check which IDs from the list already exist in MeiliSearch.
+
+        Args:
+            ids: List of primary key values to check
 
         Returns:
-            Set of primary key values existing in MeiliSearch
+            Set of IDs that exist in MeiliSearch
         """
         index = self.meili_client.index(self.config.index)
         existing_ids = set()
-        offset = 0
-        limit = 1000
 
         try:
-            while True:
-                # Fetch only primary key field (lightweight)
-                docs = await index.get_documents(
-                    offset=offset,
-                    limit=limit,
-                    fields=[self.config.primary_key]
+            # Fetch documents by IDs (only primary key field)
+            # MeiliSearch doesn't have a bulk "check existence" API, so we fetch with filters
+            # For efficiency, we use the get_documents endpoint with offset/limit
+            # But this is a simplified approach - for large batches, consider using search with filters
+
+            # Build filter for IDs
+            if len(ids) == 0:
+                return existing_ids
+
+            # Use search with filter to check existence
+            # Note: This requires the primary_key to be filterable
+            id_filter = f"{self.config.primary_key} IN [{','.join(repr(str(id)) for id in ids)}]"
+
+            try:
+                result = await index.search(
+                    query="",
+                    filter=id_filter,
+                    limit=len(ids),
+                    attributes_to_retrieve=[self.config.primary_key]
                 )
 
-                if not docs.results:
-                    break
+                # Extract existing IDs
+                for hit in result.hits:
+                    existing_ids.add(hit[self.config.primary_key])
 
-                # Extract IDs
-                for doc in docs.results:
-                    existing_ids.add(doc[self.config.primary_key])
-
-                offset += limit
-
-                # Stop if we got fewer than limit (last page)
-                if len(docs.results) < limit:
-                    break
+            except Exception:
+                # If filter search fails, fall back to fetching all and checking
+                # This is slower but more compatible
+                for id_val in ids:
+                    try:
+                        doc = await index.get_document(id_val)
+                        if doc:
+                            existing_ids.add(id_val)
+                    except Exception:
+                        # Document doesn't exist
+                        pass
 
         except Exception as e:
-            print(f"⚠️  Warning: Could not fetch existing IDs from MeiliSearch: {e}")
-            print(f"   Proceeding with full sync...")
-            return set()  # Empty set = sync everything
+            print(f"⚠️  Warning: Could not check IDs in MeiliSearch: {e}")
+            # Return empty set = assume nothing exists, sync everything
 
         return existing_ids
 
@@ -277,10 +292,10 @@ class SyncTask:
 
     async def run(self, init: bool = False) -> dict[str, Any]:
         """
-        Run the sync task using ID-diff strategy.
+        Run the sync task using streaming batch-check strategy.
 
         Args:
-            init: If True, perform full sync (ignore existing MeiliSearch IDs and state)
+            init: If True, perform full sync (skip existence checks)
 
         Returns:
             Statistics dictionary with sync results
@@ -294,102 +309,64 @@ class SyncTask:
         # Step 1: Configure MeiliSearch index
         await self.configure_index()
 
-        # Step 2: Determine which documents to sync
-        ids_to_sync = []
+        # Step 2: Create worker queue and start workers
+        queue: asyncio.Queue[list[dict] | None] = asyncio.Queue(maxsize=self.workers * 2)
 
-        if init:
-            # Full sync: sync everything from database
-            print(f"→ Full sync (init mode)")
-            db_ids = await self.db_source.get_all_ids(
-                self.config.collection,
-                self.config.primary_key
-            )
-            ids_to_sync = list(db_ids)
-        else:
-            # Incremental sync: ID-diff
-            print(f"→ Incremental sync (ID-diff mode)")
-
-            # Get existing IDs from MeiliSearch
-            print(f"  ⟳ Fetching existing IDs from MeiliSearch...")
-            meili_ids = await self.get_existing_ids_from_meili()
-            print(f"  ✓ Found {len(meili_ids)} existing documents")
-
-            # Get all IDs from database
-            print(f"  ⟳ Fetching all IDs from database...")
-            db_ids = await self.db_source.get_all_ids(
-                self.config.collection,
-                self.config.primary_key
-            )
-            print(f"  ✓ Found {len(db_ids)} documents in database")
-
-            # Calculate difference
-            missing_ids = db_ids - meili_ids
-            ids_to_sync = list(missing_ids)
-            print(f"  → {len(ids_to_sync)} new documents to sync")
-
-        # Step 3: Create worker queue and start workers
-        queue: asyncio.Queue[list[dict] | None] = asyncio.Queue(maxsize=self.workers)
+        progress = tqdm(desc=f"Syncing documents", unit=" docs")
         workers = [
-            asyncio.create_task(self.worker(queue, None))
+            asyncio.create_task(self.worker(queue, progress))
             for _ in range(self.workers)
         ]
 
-        # Step 4: Fetch and enqueue missing documents
         try:
-            if ids_to_sync:
-                with tqdm(desc=f"Syncing new docs", unit=" docs", total=len(ids_to_sync)) as progress:
-                    # Update worker progress reference
-                    for worker_task in workers:
-                        # Create new workers with progress bar
-                        pass
+            # Step 3: Stream documents in batches and check existence
+            if init:
+                print(f"→ Full sync mode (skipping existence checks)")
+            else:
+                print(f"→ Incremental sync mode (streaming batch-check)")
 
-                    # Create workers with progress
-                    workers = [
-                        asyncio.create_task(self.worker(queue, progress))
-                        for _ in range(self.workers)
-                    ]
+            batch_size = 10000  # Fetch 10k documents at a time from database
 
-                    async for batch in self.db_source.fetch_documents_by_ids(
-                        self.config.collection,
-                        ids_to_sync,
-                        self.chunk_size
-                    ):
-                        await queue.put(batch)
+            async for batch in self.db_source.fetch_documents_batched(
+                self.config.collection,
+                self.config.primary_key,
+                batch_size
+            ):
+                if init:
+                    # Full sync: upload everything
+                    await queue.put(batch)
+                else:
+                    # Incremental sync: check which IDs already exist
+                    batch_ids = [doc[self.config.primary_key] for doc in batch]
+                    existing_ids = await self.check_ids_exist_in_meili(batch_ids)
 
-            # Step 5: Handle updates (if configured)
+                    # Filter out documents that already exist
+                    missing_docs = [doc for doc in batch if doc[self.config.primary_key] not in existing_ids]
+
+                    if missing_docs:
+                        await queue.put(missing_docs)
+
+            # Step 4: Handle updates (if configured)
             if not init and self.config.updated_at_field:
-                print(f"\n  → Checking for updated documents...")
+                print(f"\n→ Checking for updated documents...")
                 last_sync = self.load_last_sync_time()
 
                 if last_sync:
-                    print(f"    Last sync: {last_sync}")
-                    updated_count = 0
+                    print(f"  Last sync: {last_sync}")
 
-                    with tqdm(desc=f"Syncing updates", unit=" docs") as progress:
-                        # Create workers with progress
-                        workers = [
-                            asyncio.create_task(self.worker(queue, progress))
-                            for _ in range(self.workers)
-                        ]
-
-                        async for batch in self.db_source.fetch_updated_documents(
-                            self.config.collection,
-                            self.config.updated_at_field,
-                            last_sync,
-                            self.chunk_size
-                        ):
-                            await queue.put(batch)
-                            updated_count += len(batch)
-
-                    print(f"    ✓ {updated_count} updated documents re-synced")
-                else:
-                    print(f"    No previous sync found, skipping update check")
+                    async for batch in self.db_source.fetch_updated_documents(
+                        self.config.collection,
+                        self.config.updated_at_field,
+                        last_sync,
+                        self.chunk_size
+                    ):
+                        await queue.put(batch)
 
                 # Save current timestamp
                 current_time = datetime.now(timezone.utc).isoformat()
                 self.save_last_sync_time(current_time)
 
-            # Send sentinel values to stop workers
+            # Step 5: Send sentinel values to stop workers
             for _ in range(self.workers):
                 await queue.put(None)
 
@@ -400,6 +377,9 @@ class SyncTask:
             print(f"\n✗ Error during sync: {e}")
             self.should_stop = True
             raise
+        finally:
+            # Close progress bar
+            progress.close()
 
         # Step 6: Calculate duration and return results
         duration = time.time() - start_time

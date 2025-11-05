@@ -18,10 +18,10 @@ class DatabaseSource(Protocol):
     Abstract interface for database sources.
     Implementations: MySQLSource, MongoDBSource
 
-    Uses ID-diff strategy for incremental sync:
-    - Fetch all IDs from DB and MeiliSearch
-    - Sync only missing documents
-    - Optionally detect updates via timestamp field
+    Uses streaming batch-check strategy for incremental sync:
+    - Stream documents in batches from database
+    - No need to count total or load all IDs into memory
+    - Memory-efficient for large datasets
     """
 
     async def connect(self) -> None:
@@ -32,33 +32,19 @@ class DatabaseSource(Protocol):
         """Close database connection"""
         ...
 
-    async def get_all_ids(self, collection: str, primary_key: str) -> set[Any]:
+    def fetch_documents_batched(
+        self,
+        collection: str,
+        primary_key: str,
+        batch_size: int
+    ) -> AsyncIterator[list[dict]]:
         """
-        Fetch all primary key values from collection/table.
-        Used for ID-diff incremental sync.
+        Stream all documents from collection/table in batches.
 
         Args:
             collection: Collection/table name
             primary_key: Primary key field name
-
-        Returns:
-            Set of all primary key values in the collection
-        """
-        ...
-
-    def fetch_documents_by_ids(
-        self,
-        collection: str,
-        ids: list[Any],
-        chunk_size: int
-    ) -> AsyncIterator[list[dict]]:
-        """
-        Fetch specific documents by their primary key values.
-
-        Args:
-            collection: Collection/table name
-            ids: List of primary key values to fetch
-            chunk_size: Number of documents per chunk
+            batch_size: Number of documents per batch
 
         Yields:
             Lists of document dictionaries
@@ -124,48 +110,39 @@ class MySQLSource:
             self.pool.close()
             await self.pool.wait_closed()
 
-    async def get_all_ids(self, collection: str, primary_key: str) -> set[Any]:
-        """Fetch all primary key values from table"""
-        assert self.pool is not None, "Database not connected"
-        async with self.pool.acquire() as conn:
-            async with conn.cursor(aiomysql.DictCursor) as cursor:
-                query = f"SELECT `{primary_key}` FROM `{collection}`"
-                await cursor.execute(query)
-                rows = await cursor.fetchall()
-                return {row[primary_key] for row in rows}
-
-    async def fetch_documents_by_ids(
+    async def fetch_documents_batched(
         self,
         collection: str,
-        ids: list[Any],
-        chunk_size: int
+        primary_key: str,
+        batch_size: int
     ) -> AsyncIterator[list[dict]]:
         """
-        Fetch specific documents by their IDs.
+        Stream all documents from MySQL table in batches.
 
-        Yields chunks of documents.
+        Yields batches of documents ordered by primary key.
         """
         assert self.pool is not None, "Database not connected"
 
-        if not ids:
-            return
-
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cursor:
-                # Process IDs in chunks
-                for i in range(0, len(ids), chunk_size):
-                    chunk_ids = ids[i:i + chunk_size]
+                query = f"SELECT * FROM `{collection}` ORDER BY `{primary_key}` LIMIT %s OFFSET %s"
+                offset = 0
 
-                    # Build IN clause
-                    placeholders = ','.join(['%s'] * len(chunk_ids))
-                    query = f"SELECT * FROM `{collection}` WHERE `id` IN ({placeholders})"
-
-                    await cursor.execute(query, chunk_ids)
+                while True:
+                    await cursor.execute(query, (batch_size, offset))
                     rows = await cursor.fetchall()
 
-                    if rows:
-                        documents = [dict(row) for row in rows]
-                        yield documents
+                    if not rows:
+                        break
+
+                    documents = [dict(row) for row in rows]
+                    yield documents
+
+                    offset += len(documents)
+
+                    # If we got fewer than batch_size, we're done
+                    if len(documents) < batch_size:
+                        break
 
     async def fetch_updated_documents(
         self,
@@ -237,72 +214,56 @@ class MongoDBSource:
         if self.client:
             self.client.close()
 
-    async def get_all_ids(self, collection: str, primary_key: str) -> set[Any]:
-        """Fetch all primary key values from collection"""
-        assert self.db is not None, "Database not connected"
-        coll = self.db[collection]
-
-        # Fetch only the primary key field
-        cursor = coll.find({}, {primary_key: 1, '_id': 0} if primary_key != '_id' else {'_id': 1})
-        ids = set()
-
-        async for doc in cursor:
-            value = doc.get(primary_key)
-            # Convert ObjectId to string if needed
-            if isinstance(value, ObjectId):
-                ids.add(str(value))
-            else:
-                ids.add(value)
-
-        return ids
-
-    async def fetch_documents_by_ids(
+    async def fetch_documents_batched(
         self,
         collection: str,
-        ids: list[Any],
-        chunk_size: int
+        primary_key: str,
+        batch_size: int
     ) -> AsyncIterator[list[dict]]:
         """
-        Fetch specific documents by their IDs.
+        Stream all documents from MongoDB collection in batches.
 
-        Yields chunks of documents.
+        Yields batches of documents ordered by primary key.
         """
         assert self.db is not None, "Database not connected"
-
-        if not ids:
-            return
-
         coll = self.db[collection]
 
-        # Process IDs in chunks
-        for i in range(0, len(ids), chunk_size):
-            chunk_ids = ids[i:i + chunk_size]
+        # Use cursor with batching - no skip, use last ID for continuation
+        last_id = None
 
-            # Convert string IDs back to ObjectId if needed
-            converted_ids = []
-            for id_val in chunk_ids:
-                if isinstance(id_val, str) and len(id_val) == 24:
-                    try:
-                        converted_ids.append(ObjectId(id_val))
-                    except Exception:
-                        # Not a valid ObjectId string, use as-is
-                        converted_ids.append(id_val)
+        while True:
+            # Build query filter
+            if last_id is not None:
+                if primary_key == "_id":
+                    query = {"_id": {"$gt": last_id}}
                 else:
-                    converted_ids.append(id_val)
+                    query = {primary_key: {"$gt": last_id}}
+            else:
+                query = {}
 
-            # Fetch documents
-            cursor = coll.find({"_id": {"$in": converted_ids}})
-            documents = await cursor.to_list(length=chunk_size)
+            # Fetch batch sorted by primary key
+            cursor = coll.find(query).sort(primary_key, 1).limit(batch_size)
+            documents = await cursor.to_list(length=batch_size)
 
-            if documents:
-                # Convert ObjectId to string
-                processed_docs = []
-                for doc in documents:
-                    if '_id' in doc and isinstance(doc['_id'], ObjectId):
-                        doc['_id'] = str(doc['_id'])
-                    processed_docs.append(doc)
+            if not documents:
+                break
 
-                yield processed_docs
+            # Convert ObjectId to string for MeiliSearch compatibility
+            processed_docs = []
+            for doc in documents:
+                if '_id' in doc and isinstance(doc['_id'], ObjectId):
+                    doc['_id'] = str(doc['_id'])
+                processed_docs.append(doc)
+
+            yield processed_docs
+
+            # Update last_id for next iteration
+            last_doc = documents[-1]
+            last_id = last_doc.get(primary_key)
+
+            # If we got fewer than batch_size, we're done
+            if len(documents) < batch_size:
+                break
 
     async def fetch_updated_documents(
         self,
