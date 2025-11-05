@@ -1,0 +1,78 @@
+# Example configuration for db2meili
+# Copy this file to config.toml and fill in your credentials
+
+# ============================================================================
+# DATABASE SOURCE CONFIGURATION
+# ============================================================================
+
+[source]
+# Database type: "mysql" or "mongodb"
+type = "mongodb"
+
+# Connection details
+host = "localhost"
+port = 27017          # MongoDB default: 27017, MySQL default: 3306
+username = "admin"
+password = "password"
+database = "mydb"
+
+# ============================================================================
+# MEILISEARCH CONFIGURATION
+# ============================================================================
+
+[meilisearch]
+# MeiliSearch server URL
+api_url = "http://127.0.0.1:7700"
+
+# MeiliSearch API key (master key for admin operations)
+api_key = "masterKey"
+
+# ============================================================================
+# WORKER CONFIGURATION
+# ============================================================================
+
+[workers]
+# Number of async workers per sync task
+# Higher values = faster sync but more resource usage
+per_task = 12
+
+# Documents per batch sent to MeiliSearch
+chunk_size = 50
+
+# ============================================================================
+# SYNC TASKS
+# ============================================================================
+# Define one or more [[sync]] blocks
+# Each represents a collection/table → MeiliSearch index mapping
+
+# Example 1: Blog posts
+[[sync]]
+collection = "posts"           # Collection name (MongoDB) or table name (MySQL)
+index = "posts_index"          # MeiliSearch index name
+primary_key = "id"             # Primary key field
+
+# Attribute configuration (simple format)
+# Each field can be: filterable, sortable, searchable
+[sync.attributes]
+id = ["filterable", "sortable"]
+title = ["searchable", "filterable"]
+content = ["searchable"]
+author = ["filterable"]
+tags = ["filterable"]
+published_date = ["sortable", "filterable"]
+view_count = ["sortable"]
+
+# Example 2: User comments
+[[sync]]
+collection = "comments"
+index = "comments_index"
+primary_key = "_id"            # MongoDB's default primary key
+
+[sync.attributes]
+_id = ["filterable"]
+post_id = ["filterable"]
+user_id = ["filterable"]
+content = ["searchable"]
+created_at = ["sortable", "filterable"]
+
+# Add more [[sync]] blocks as needed...

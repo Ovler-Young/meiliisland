@@ -2,3 +2,7 @@ meilisearch-python-sdk
 mysql-connector-python
 tqdm
 markdownify
+tomli>=2.0.0; python_version < '3.11'
+motor>=3.3.0
+aiomysql>=0.2.0
+pymongo>=4.6.0
